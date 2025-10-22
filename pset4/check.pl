@@ -16,12 +16,13 @@ use POSIX;
 use Scalar::Util qw(looks_like_number);
 use List::Util qw(shuffle min max);
 use Config;
+use JSON;
 my $nkilled = 0;
 my $nerror = 0;
 my (@ratios, @runtimes, @basetimes, @alltests, @cachedtests);
 my %fileinfo;
 sub first (@) { return $_[0]; }
-my $CHECKSUM = first(grep {-x $_} ("/usr/bin/md5sum", "/sbin/md5", "/bin/false"));
+my $CHECKSUM = first(grep {-x $_} ("/usr/bin/md5sum", "/sbin/md5sum", "/sbin/md5", "/bin/false"));
 my $TTY = (`tty` or "/dev/tty");
 chomp($TTY);
 my (@sig_name) = split(/ /, $Config{"sig_name"});
@@ -108,8 +109,12 @@ sub verify_file ($) {
 
 sub file_md5sum ($) {
     my ($x) = `$CHECKSUM $_[0]`;
-    $x =~ s{\A(\S+).*\z}{$1}s;
-    return $x;
+    if ($x =~ /\AMD5.*= ([0-9a-f]{32})\s*$/
+        || $x =~ /\A([0-9a-f]{32})(?:\s+|$)/) {
+        $1;
+    } else {
+        0;
+    }
 }
 
 sub unparse_signal ($) {
@@ -425,19 +430,16 @@ sub testid_runnable ($) {
 
 
 sub read_triallog ($) {
-    my ($buf);
+    my ($buf, $t);
     open(TRIALLOG, "<", $_[0]) or die "$_[0]: $!\n";
     while (defined($buf = <TRIALLOG>)) {
-        my ($t) = {};
-        while ($buf =~ m,"([^"]*)"\s*:\s*([\d.]+),g) {
-            $t->{$1} = $2 + 0;
-        }
-        while ($buf =~ m,"([^"]*)"\s*:\s*"([^"]*)",g) {
-            $t->{$1} = $2;
-        }
-        if (keys(%$t)) {
-            $t->{"cached"} = 1;
-            push @cachedtests, $t;
+        $buf =~ s/^\x1e//;
+        eval {
+            $t = decode_json($buf);
+            if (keys(%$t)) {
+                $t->{"cached"} = 1;
+                push @cachedtests, $t;
+            }
         }
     }
     close(TRIALLOG);
@@ -570,20 +572,17 @@ sub enqueue ($$$%) {
     }
 
     # prepare normal command
-    my $runcommand = $command;
-    $runcommand =~ s{(\./[-a-z]*61)}{strace -o strace.out $1}
-        if $param{"STRACE"};
     my $trials = $perf ? $param{"TRIALS"} : 1;
     $trials = 0 if $param{"NOYOURCODE"};
     my $your_qitem = {
         "id" => $id, "desc" => $desc, "type" => "yourcode",
-        "command" => $runcommand,
+        "command" => $command,
         "maincommand" => $command, "stdiocommand" => $stdiocmd,
         "count" => 0, "elapsed" => 0, "errors" => 0, "nleft" => $trials,
         "infiles" => \@infiles, "outfiles" => [],
         "insize" => $insize, "check_max_size" => 1, "opt" => \%opt,
         "compare" => $compare, "check_random" => $check_random,
-        "perf" => $perf, "has_stdio" => $stdio
+        "perf" => $perf, "has_stdio" => $stdio, "strace" => $param{"STRACE"}
     };
     while ($command =~ m{(outputs/[^\s'"|()&<>;!]*\.(?:txt|bin))}g) {
         push @{$your_qitem->{"outfiles"}}, $1;
@@ -595,6 +594,12 @@ sub enqueue ($$$%) {
 }
 
 my $qitem_last_error;
+
+sub strace_command ($) {
+    my ($c) = @_;
+    $c =~ s{(\./[-a-z]*61)}{strace -o strace.out $1};
+    $c;
+}
 
 sub run_qitem ($) {
     my ($qitem) = @_;
@@ -634,6 +639,7 @@ sub run_qitem ($) {
     }
 
     my ($command) = $qitem->{"command"};
+    $command = strace_command($command) if $qitem->{"strace"};
     die if $command =~ /${ROOT}/ && $ROOT ne "";
     $command =~ s/\b(inputs|outputs|stdoutputs)\//${ROOT}$1\//g;
     my (@size_limit_files) = @{$qitem->{"outfiles"}};
@@ -655,6 +661,7 @@ sub run_qitem ($) {
                            "compare" => $qitem->{"compare"});
         $result->{"qcommand"} = $qitem->{"command"};
         $result->{"perf"} = $qitem->{"perf"};
+        $result->{"strace"} = 1 if $qitem->{"strace"};
     }
 
     push @alltests, $result;
@@ -691,10 +698,11 @@ sub check_trial_output ($$$) {
 
     my (@content_check, $md5sum_check);
     if (!$param{"NOYOURCODE"} && $qitem->{"compare"}) {
-        @content_check = @{$qitem->{"outfiles"}}
-            if $expect || (!$param{"NOSTDIO"} && $stdiot);
-        $md5sum_check = $stdiot->{"md5sum"}
-            if $param{"NOSTDIO"} && $stdiot && exists($stdiot->{"md5sum"});
+        if ($stdiot && exists($stdiot->{"md5sum"}) && $stdiot->{"cached"}) {
+            $md5sum_check = $stdiot->{"md5sum"};
+        } elsif ($expect || !$stdiot || !$stdiot->{"cached"}) {
+            @content_check = @{$qitem->{"outfiles"}};
+        }
     }
     foreach my $fname (@content_check) {
         my $rootfname = $fname;
@@ -893,7 +901,6 @@ sub run () {
             && $SEQTEST
             && $qitem->{"type"} eq "yourcode"
             && ($stdiot = median_trial($id, "stdio", $qitem))) {
-            print "STDIO:     " if $param{"NOSTDIO"};
             print_stdio($stdiot);
         }
         maybe_make($qitem->{"command"});
@@ -901,8 +908,9 @@ sub run () {
             maybe_make("./randcheck61");
         }
         if ($type ne $qitem->{"type"}) {
-            print "STRACE COMMAND:\n           ", $qitem->{"command"}, "\n"
-                if $print_command && $param{"STRACE"};
+            if ($qitem->{"strace"} && $print_command) {
+                print "STRACE COMMAND:\n           ", strace_command($qitem->{"command"}), "\n";
+            }
             $type = $qitem->{"type"};
             print ($type eq "stdio" ? "STDIO:     " : "YOUR CODE: ");
         }
@@ -980,6 +988,10 @@ sub run () {
             push @ratios, $ratio;
             push @basetimes, $stdiot->{"time"};
         }
+        if ($tt && $tt->{"strace"}) {
+            print STDERR "${Green}strace output in strace.out$Off\n";
+            exit(0);
+        }
         if ($tt && !exists($tt->{"killed"})) {
             if (check_trial_errors($tt, $qitem)) {
                 ++$nerror;
@@ -1037,13 +1049,9 @@ sub summary () {
     if ($VERBOSE || $param{"MAKETRIALLOG"} || $param{"CACHE"}) {
         my $skip_my = !$param{"MAKETRIALLOG"};
         my (@testjsons);
-        foreach my $t (@alltests) {
+        foreach my $t (@alltests, @cachedtests) {
             next if $skip_my && $t->{"type"} ne "stdio";
-            my (@tout, $k, $v) = ();
-            while (($k, $v) = each %$t) {
-                push @tout, "\"$k\":" . (looks_like_number($v) ? $v : "\"$v\"");
-            }
-            push @testjsons, "{" . join(",", @tout) . "}\n";
+            push @testjsons, ((encode_json $t) . "\n");
         }
         print "\n", @testjsons if $VERBOSE;
         if (($param{"MAKETRIALLOG"} || $param{"CACHE"}) && @testjsons) {

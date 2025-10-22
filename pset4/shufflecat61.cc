@@ -9,7 +9,7 @@
 
 int main(int argc, char* argv[]) {
     // Parse arguments
-    io61_args args = io61_args("b:r:s:o:i:", 4096).set_seed(83419)
+    io61_args args = io61_args("b:r:s:o:i:A:", 4096).set_seed(83419)
         .parse(argc, argv);
 
     // Allocate buffer, open files, measure file sizes

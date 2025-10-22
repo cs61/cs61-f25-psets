@@ -1,8 +1,8 @@
 #include "io61.hh"
 #include <ctime>
 #include <csignal>
+#include <climits>
 #include <cerrno>
-#include <charconv>
 #include <sys/time.h>
 #include <sys/resource.h>
 
@@ -122,16 +122,19 @@ static void sigalrm_handler(int) {
 
 std::optional<size_t> io61_args::parse_size(const char* s) {
     const char* ends = s + strlen(s);
-    std::from_chars_result fcr;
-    size_t v;
+    char* ptr = const_cast<char*>(s);
+    size_t v = 0;
+    errno = 0;
     if (s[0] == '0' && tolower((unsigned char) s[1]) == 'x') {
-        fcr = std::from_chars(s + 2, ends, v, 16);
-    } else {
-        fcr = std::from_chars(s, ends, v, 10);
+        v = strtoul(s + 2, &ptr, 16);
+    } else if (isdigit((unsigned char) s[0])) {
+        v = strtoul(s, &ptr, 10);
     }
-    if (fcr.ec != std::errc()) {
+    if (ptr == s && *s == '.') {
+        // parse floating point
+    } else if (ptr == s || (v == ULONG_MAX && errno == ERANGE)) {
         return std::nullopt;
-    } else if (fcr.ptr == ends) {
+    } else if (ptr == ends) {
         return v;
     }
 
@@ -139,15 +142,15 @@ std::optional<size_t> io61_args::parse_size(const char* s) {
     if (s[0] == '0' && tolower((unsigned char) s[1]) == 'x') {
         fv = v;
     } else {
-        fcr = std::from_chars(s, ends, fv, std::chars_format::fixed);
-    }
-    if (fcr.ec != std::errc()) {
-        return std::nullopt;
+        fv = strtod(s, &ptr);
+        if (ptr == s || strchr(s, 'e') || strchr(s, 'E')) {
+            return std::nullopt;
+        }
     }
 
     // parse `k`/`m`/`g` suffixes
-    if (fcr.ptr != ends) {
-        char ch = tolower((unsigned char) *fcr.ptr);
+    if (ptr != ends) {
+        char ch = tolower((unsigned char) *ptr);
         if (ch == 'k') {
             fv *= 1024;
         } else if (ch == 'm') {
@@ -157,7 +160,7 @@ std::optional<size_t> io61_args::parse_size(const char* s) {
         } else {
             return std::nullopt;
         }
-        if (fcr.ptr + 1 != ends) {
+        if (ptr + 1 != ends) {
             return std::nullopt;
         }
     }
@@ -179,8 +182,9 @@ io61_args& io61_args::parse(int argc, char** argv) {
     while ((arg = getopt(argc, argv, this->opts)) != -1) {
         switch (arg) {
         case 's':
-            this->file_size = strtoul(optarg, &endptr, 0);
-            if (endptr == optarg || *endptr) {
+            if (auto sz = parse_size(optarg)) {
+                this->file_size = *sz;
+            } else {
                 goto usage;
             }
             break;
@@ -326,11 +330,13 @@ io61_args& io61_args::parse(int argc, char** argv) {
     }
 
     if (this->as_limit > 0) {
-#ifdef RLIMIT_AS
+#if defined(RLIMIT_AS) && !__MACH__
         struct rlimit rlim;
         rlim.rlim_cur = rlim.rlim_max = this->as_limit;
         int r = setrlimit(RLIMIT_AS, &rlim);
-        assert(r == 0);
+        if (r != 0) {
+            fprintf(stderr, "\n*** MEMORY LIMIT IGNORED *** %s\n\n* Run this test in Docker or on the grading server.\n\n", strerror(errno));
+        }
 #else
         fprintf(stderr, "\n*** MEMORY LIMIT IGNORED ***\n\n* Run this test in Docker or on the grading server.\n\n");
 #endif
