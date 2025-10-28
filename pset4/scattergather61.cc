@@ -26,6 +26,20 @@ ssize_t read_line(io61_file* f, unsigned char* buf, size_t sz) {
     return i;
 }
 
+ssize_t read_block(io61_file* f, unsigned char* buf, size_t sz) {
+    size_t i = 0;
+    while (i != sz) {
+        ssize_t nr = io61_read(f, buf + i, sz - i);
+        if (nr < 0 && i == 0) {
+            return nr;
+        } else if (nr <= 0) {
+            break;
+        }
+        i += nr;
+    }
+    return i;
+}
+
 
 int main(int argc, char* argv[]) {
     // Parse arguments
@@ -52,7 +66,7 @@ int main(int argc, char* argv[]) {
         if (args.read_lines) {
             nr = read_line(infs[ini], buf, args.block_size);
         } else {
-            nr = io61_read(infs[ini], buf, args.block_size);
+            nr = read_block(infs[ini], buf, args.block_size);
         }
         if (nr <= 0) {
             io61_close(infs[ini]);
