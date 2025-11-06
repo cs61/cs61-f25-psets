@@ -101,7 +101,7 @@ void command::run() {
 void run_line(command_line_parser clp) {
     command* c = new command;
     for (auto tok = clp.token_begin(); tok != clp.end(); ++tok) {
-        c->args.push_back(clp.str());
+        c->args.push_back(tok.str());
     }
     c->run();
     delete c;
