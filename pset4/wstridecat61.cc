@@ -39,8 +39,8 @@ int main(int argc, char* argv[]) {
 
         // Determine block size
         size_t block_size = args.block_size;
-        if (pos + block_size > args.stride) {
-            block_size = args.stride - pos;
+        if (pos + block_size > args.file_size) {
+            block_size = args.file_size - pos;
         }
 
         // Copy a block
